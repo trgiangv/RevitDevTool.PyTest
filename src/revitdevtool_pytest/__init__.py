@@ -1,4 +1,4 @@
-"""RevitDevTool.PyTest: Run pytest tests inside a live Autodesk host (Revit, AutoCAD, Civil3D, etc.) via Named Pipe bridge."""
+"""RevitDevTool.PyTest: Run pytest tests inside a live Autodesk host through a direct named-pipe MCP session."""
 
 from .constants import PACKAGE_VERSION
 

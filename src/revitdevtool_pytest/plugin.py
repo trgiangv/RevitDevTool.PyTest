@@ -1,7 +1,7 @@
 """pytest plugin — redirect test execution to a running host instance.
 
 Thin hook orchestrator. Delegates to:
-- ``connection`` — bridge lifecycle, discovery, lease, launch, retry
+- ``connection`` — direct MCP lifecycle, discovery, lease, launch, retry
 - ``reporting``  — remote result <-> pytest report mapping
 - ``suite_lock`` — Windows Mutex + suite context resolution
 """

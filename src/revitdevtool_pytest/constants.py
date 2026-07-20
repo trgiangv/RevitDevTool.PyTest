@@ -170,7 +170,7 @@ def get_host_config(host_name: str) -> HostConfig:
 
     Returns a minimal config with pipe_prefix = host_name if the host
     is not in the registry. This allows connecting to any host that
-    exposes a DevToolsPipeServer pipe without pre-registration.
+    exposes a canonical host MCP pipe without pre-registration.
     """
     key = host_name.strip().lower()
     config = HOST_REGISTRY.get(key)
