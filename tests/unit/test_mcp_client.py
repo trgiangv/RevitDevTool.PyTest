@@ -17,7 +17,7 @@ from revitdevtool_pytest.mcp_client import (
     RemotePytestInfrastructureError,
 )
 from revitdevtool_pytest.models import RunRequest
-from revitdevtool_pytest.named_pipe_transport import CaseEvent
+from revitdevtool_pytest.named_pipe_transport import CaseEvent, _read_messages
 from revitdevtool_pytest.pipe_name import HostIdentity
 
 
@@ -83,6 +83,21 @@ def fake_transport(*, server_name: str = "Revit") -> FakeTransport:
     return FakeTransport(server_name=server_name)
 
 
+class LegacyFramePipe:
+    def __init__(self) -> None:
+        payload = b'{"id":"legacy","method":"tests/run","payload":{}}\n'
+        self._reads = [len(payload).to_bytes(4, "little") + payload, b""]
+
+    def read(self, _: int) -> bytes:
+        return self._reads.pop(0)
+
+    def write(self, _: bytes) -> None:
+        raise AssertionError("the MCP client must not write a legacy bridge response")
+
+    def close(self) -> None:
+        pass
+
+
 def test_connect_initializes_and_validates_server_identity() -> None:
     client = HostMcpClient(
         HostIdentity("DevTools_Revit_2025_7", "Revit", "2025", 7),
@@ -115,6 +130,19 @@ async def test_initialize_advertises_nested_case_event_capability() -> None:
     assert session.initialize_request.root.params.capabilities.experimental == {
         "devtools": {"pytest": {"caseEvents": {"version": "1"}}}
     }
+
+
+@pytest.mark.anyio
+async def test_mcp_transport_rejects_length_prefixed_legacy_bridge_frame() -> None:
+    pipe = LegacyFramePipe()
+    destination, receive = anyio.create_memory_object_stream(1)
+
+    try:
+        with pytest.raises(ValueError, match="Invalid JSON"):
+            await _read_messages(pipe, destination, None)
+    finally:
+        await receive.aclose()
+
 
 
 def test_run_tests_uses_pytest_tool_and_parses_structured_result() -> None:
