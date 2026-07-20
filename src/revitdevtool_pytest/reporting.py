@@ -15,7 +15,7 @@ import pytest
 
 from .bridge import HostBridge
 from .constants import (
-    BRIDGE_NOTIFY_TEST_PROGRESS,
+    CASE_EVENT_METHOD,
     OUTCOME_ERROR,
     OUTCOME_FAILED,
     OUTCOME_PASSED,
@@ -89,7 +89,7 @@ def _build_streaming_callback(
     items_by_nodeid = {item.nodeid: item for item in session.items}
 
     def on_notification(method: str, params: Any) -> None:
-        if method != BRIDGE_NOTIFY_TEST_PROGRESS or params is None:
+        if method != CASE_EVENT_METHOD or params is None:
             return
         _emit_streaming_report(params, items_by_nodeid, streamed)
 

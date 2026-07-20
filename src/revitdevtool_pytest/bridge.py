@@ -9,19 +9,17 @@ from __future__ import annotations
 import json
 import logging
 import struct
+import uuid
 import time
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .constants import (
-    BRIDGE_METHOD_TESTS_RUN,
-    BRIDGE_MSG_TYPE_NOTIFICATION,
     DEFAULT_CONNECT_TIMEOUT_MS,
     DEFAULT_TEST_TIMEOUT_S,
     PLUGIN_NAME,
 )
 from .models import (
-    BridgeRequest,
-    BridgeResponse,
     CollectionError,
     RunRequest,
     RunResponse,
@@ -32,8 +30,40 @@ log = logging.getLogger(PLUGIN_NAME)
 _MAX_FRAME_SIZE = 16 * 1024 * 1024
 _HEADER_FMT = "<I"
 _HEADER_LEN = struct.calcsize(_HEADER_FMT)
+_LEGACY_TESTS_RUN_METHOD = "tests/run"
+_LEGACY_NOTIFICATION_TYPE = "notification"
 
 NotificationCallback = Callable[[str, Any], None]
+
+
+@dataclass(slots=True)
+class _BridgeRequest:
+    method: str
+    params: dict[str, Any] | None = None
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def to_json_bytes(self) -> bytes:
+        message: dict[str, Any] = {"type": "request", "id": self.id, "method": self.method}
+        if self.params is not None:
+            message["params"] = self.params
+        return json.dumps(message, ensure_ascii=False).encode("utf-8")
+
+
+@dataclass(frozen=True, slots=True)
+class _BridgeResponse:
+    id: str
+    result: Any = None
+    is_error: bool = False
+    error_message: str = ""
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> _BridgeResponse:
+        return cls(
+            id=data.get("id", ""),
+            result=data.get("result"),
+            is_error=data.get("isError", False),
+            error_message=data.get("errorMessage", ""),
+        )
 
 
 class HostBridge:
@@ -120,8 +150,8 @@ class HostBridge:
             nodeids=nodeids,
             pytest_args=pytest_args or [],
         )
-        response: BridgeResponse = self._request(
-            BridgeRequest(method=BRIDGE_METHOD_TESTS_RUN, params=request.to_params()),
+        response: _BridgeResponse = self._request(
+            _BridgeRequest(method=_LEGACY_TESTS_RUN_METHOD, params=request.to_params()),
             timeout_s,
             on_notification=on_notification,
         )
@@ -131,22 +161,22 @@ class HostBridge:
 
     def _request(
         self,
-        req: BridgeRequest,
+        req: _BridgeRequest,
         timeout_s: float,
         *,
         on_notification: NotificationCallback | None = None,
-    ) -> BridgeResponse:
+    ) -> _BridgeResponse:
         self._write_frame(req.to_json_bytes())
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             data = self._read_frame(deadline - time.monotonic())
             parsed = json.loads(data)
 
-            if parsed.get("type") == BRIDGE_MSG_TYPE_NOTIFICATION:
+            if parsed.get("type") == _LEGACY_NOTIFICATION_TYPE:
                 _dispatch_notification(parsed, on_notification)
                 continue
 
-            return BridgeResponse.from_json(parsed)
+            return _BridgeResponse.from_json(parsed)
 
         raise TimeoutError(f"Timed out waiting for response to {req.id}")
 
@@ -182,7 +212,7 @@ class HostBridge:
 # ---------------------------------------------------------------------------
 
 
-def _parse_run_response(response: BridgeResponse) -> RunResponse:
+def _parse_run_response(response: _BridgeResponse) -> RunResponse:
     if response.is_error:
         return RunResponse(
             exit_code=1,

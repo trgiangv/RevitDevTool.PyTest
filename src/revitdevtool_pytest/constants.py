@@ -7,9 +7,8 @@ from typing import Final
 
 PLUGIN_NAME: Final = "RevitDevTool.PyTest"
 
-BRIDGE_METHOD_TESTS_RUN: Final = "tests/run"
-BRIDGE_MSG_TYPE_NOTIFICATION: Final = "notification"
-BRIDGE_NOTIFY_TEST_PROGRESS: Final = "notifications/tests/progress"
+PYTEST_TOOL_NAME: Final = "pytest_run"
+CASE_EVENT_METHOD: Final = "notifications/tests/progress"
 
 OPT_HOST: Final = "host_name"
 OPT_VERSION: Final = "host_version"
@@ -23,14 +22,6 @@ DEFAULT_TEST_TIMEOUT_S: Final = 60.0
 DEFAULT_LAUNCH_TIMEOUT_S: Final = 120.0
 DEFAULT_CONNECT_TIMEOUT_MS: Final = 30_000
 DEFAULT_POLL_INTERVAL_S: Final = 2.0
-
-PIPE_DIR: Final = r"//./pipe"
-
-PIPE_PREFIX: Final = "DevTools"
-
-# Mirrors C# InstanceManager: DevTools_{Host}_{Version}_{PID}
-# Version is [^_]+ (any non-underscore chars) to support year, semver, etc.
-PIPE_PATTERN: Final = rf"^{PIPE_PREFIX}_(\w+)_([^_]+)_(\d+)$"
 
 EXIT_CODE_CONFIG_ERROR: Final = 4
 

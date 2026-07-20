@@ -15,14 +15,12 @@ from .constants import (
     DEFAULT_LAUNCH_TIMEOUT_S,
     DEFAULT_POLL_INTERVAL_S,
     HOST_REGISTRY,
-    PIPE_DIR,
-    PIPE_PATTERN,
     HostConfig,
     _ACAD_EXE,
     get_host_config,
 )
+from .pipe_name import iter_host_pipe_names, parse_host_pipe
 
-_PIPE_RE = re.compile(PIPE_PATTERN)
 _ACAD_PRODUCT_KEY_RE = re.compile(r"ACAD-[0-9A-F]\d(?P<productId>\d{2})", re.IGNORECASE)
 
 _PREFIX_TO_HOST: dict[str, str] = {
@@ -50,20 +48,17 @@ def find_host_pipes(host_name: str | None = None) -> list[HostInstance]:
         target_prefix = cfg.pipe_prefix.lower()
 
     instances: list[HostInstance] = []
-    for name in _list_named_pipes():
-        m = _PIPE_RE.match(name)
-        if not m:
-            continue
-        prefix_raw = m.group(1)
-        prefix_lower = prefix_raw.lower()
+    for name in iter_host_pipe_names():
+        identity = parse_host_pipe(name)
+        prefix_lower = identity.host_app.lower()
         if target_prefix is not None and prefix_lower != target_prefix:
             continue
-        resolved = _PREFIX_TO_HOST.get(prefix_lower, prefix_raw)
+        resolved = _PREFIX_TO_HOST.get(prefix_lower, identity.host_app)
         instances.append(HostInstance(
-            pipe_name=name,
+            pipe_name=identity.pipe_name,
             host_name=resolved,
-            version=m.group(2),
-            process_id=int(m.group(3)),
+            version=identity.host_version,
+            process_id=identity.process_id,
         ))
     return instances
 
@@ -293,11 +288,3 @@ def _enum_count(key: winreg.HKEYType) -> int:
         return count
     except OSError:
         return 0
-
-
-def _list_named_pipes() -> list[str]:
-    """Return base names of all Named Pipes visible to the current user."""
-    try:
-        return os.listdir(PIPE_DIR)
-    except OSError:
-        return []
