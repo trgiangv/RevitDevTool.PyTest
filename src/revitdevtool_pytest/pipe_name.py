@@ -24,9 +24,9 @@ class HostIdentity:
 def format_host_pipe(host_app: str, host_version: str, process_id: int) -> str:
     """Format a canonical ``DevTools_{Host}_{Version}_{PID}`` pipe name."""
     if (
-        not host_app
+        not host_app.strip()
         or "_" in host_app
-        or not host_version
+        or not host_version.strip()
         or "_" in host_version
         or isinstance(process_id, bool)
         or not isinstance(process_id, int)
@@ -42,7 +42,12 @@ def parse_host_pipe(name: str) -> HostIdentity:
     if len(parts) != 4 or parts[0].lower() != _HOST_PIPE_PREFIX.lower():
         raise ValueError(f"Not a canonical host pipe: {name}")
     host_app, host_version, raw_pid = parts[1:]
-    if not host_app or not host_version or not raw_pid.isdecimal() or int(raw_pid) <= 0:
+    if (
+        not host_app.strip()
+        or not host_version.strip()
+        or not raw_pid.isdecimal()
+        or int(raw_pid) <= 0
+    ):
         raise ValueError(f"Not a canonical host pipe: {name}")
     return HostIdentity(name, host_app, host_version, int(raw_pid))
 
