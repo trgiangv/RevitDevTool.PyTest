@@ -11,6 +11,7 @@ from mcp.types import JSONRPCMessage
 from revitdevtool_pytest.named_pipe_transport import (
     CaseEvent,
     _drain_complete_lines,
+    _is_case_event,
     named_pipe_streams,
 )
 
@@ -64,6 +65,23 @@ def test_case_event_parser_rejects_boolean_sequence() -> None:
 
     with pytest.raises(ValueError, match="Invalid pytest case-event"):
         CaseEvent.from_json_line(raw)
+
+
+def test_case_event_parser_rejects_boolean_progress_token() -> None:
+    raw = (
+        b'{"jsonrpc":"2.0","method":"notifications/devtools/pytest/case",'
+        b'"params":{"progressToken":true,"sequence":1,"case":{}}}'
+    )
+
+    with pytest.raises(ValueError, match="Invalid pytest case-event"):
+        CaseEvent.from_json_line(raw)
+
+
+def test_case_event_parser_rejects_non_object_json() -> None:
+    with pytest.raises(ValueError, match="Invalid pytest case-event"):
+        CaseEvent.from_json_line(b"[]")
+
+    assert _is_case_event(b"[]") is False
 
 
 @pytest.mark.anyio

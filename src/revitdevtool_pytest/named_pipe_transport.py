@@ -47,6 +47,8 @@ class CaseEvent:
     @classmethod
     def from_json_line(cls, line: bytes) -> CaseEvent:
         raw = json.loads(line)
+        if not isinstance(raw, dict):
+            raise ValueError("Invalid pytest case-event notification")
         params = _validated_case_event_params(raw)
         return cls(
             params[MCP_CASE_EVENT_PROGRESS_TOKEN],
@@ -166,19 +168,20 @@ async def _write_messages(
 
 def _is_case_event(raw_line: bytes) -> bool:
     try:
-        return json.loads(raw_line).get(MCP_METHOD_FIELD) == MCP_CASE_EVENT_METHOD
+        raw = json.loads(raw_line)
+        return isinstance(raw, dict) and raw.get(MCP_METHOD_FIELD) == MCP_CASE_EVENT_METHOD
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
 
 
-def _validated_case_event_params(raw: Any) -> dict[str, Any]:
+def _validated_case_event_params(raw: dict[str, Any]) -> dict[str, Any]:
     params = raw.get(MCP_PARAMS_FIELD)
     if not _is_valid_case_event(raw, params):
         raise ValueError("Invalid pytest case-event notification")
     return params
 
 
-def _is_valid_case_event(raw: Any, params: Any) -> bool:
+def _is_valid_case_event(raw: dict[str, Any], params: Any) -> bool:
     return (
         raw.get(MCP_JSONRPC_FIELD) == MCP_JSONRPC_VERSION
         and raw.get(MCP_METHOD_FIELD) == MCP_CASE_EVENT_METHOD
