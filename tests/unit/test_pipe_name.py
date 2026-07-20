@@ -23,6 +23,7 @@ def test_parse_host_pipe_accepts_exact_grammar() -> None:
         "DevTools__2025_12345",
         "DevTools_Revit__12345",
         "DevTools_ _2025_12345",
+        "DevTools_\u0085_2025_12345",
         "DevTools_Revit_ _12345",
         "DevTools_Revit_2025_0",
         "DevTools_Revit_LT_2025_12345",
@@ -42,6 +43,7 @@ def test_format_host_pipe_returns_canonical_name() -> None:
     [
         ("", "2025", 12345),
         (" ", "2025", 12345),
+        ("\u00a0", "2025", 12345),
         ("Revit_Name", "2025", 12345),
         ("Revit", "", 12345),
         ("Revit", " ", 12345),
@@ -56,6 +58,13 @@ def test_format_host_pipe_rejects_noncanonical_components(
 ) -> None:
     with pytest.raises(ValueError, match="canonical host pipe"):
         format_host_pipe(host_app, host_version, process_id)
+
+
+@pytest.mark.parametrize("control", ["\x1c", "\x1d", "\x1e", "\x1f"])
+def test_pipe_components_accept_dotnet_nonwhitespace_controls(control: str) -> None:
+    name = format_host_pipe(control, "2025", 12345)
+
+    assert parse_host_pipe(name) == HostIdentity(name, control, "2025", 12345)
 
 
 def test_enumerator_passes_prefix_to_win32_find() -> None:

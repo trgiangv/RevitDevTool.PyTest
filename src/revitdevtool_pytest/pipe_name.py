@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes
+import unicodedata
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 
 _HOST_PIPE_PREFIX = "DevTools"
 _HOST_PIPE_SEARCH_PATTERN = rf"\\.\pipe\{_HOST_PIPE_PREFIX}_*"
+_DOTNET_WHITESPACE_CATEGORIES = frozenset({"Zs", "Zl", "Zp"})
+_DOTNET_CONTROL_WHITESPACE = frozenset("\u0009\u000a\u000b\u000c\u000d\u0085")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,9 +27,9 @@ class HostIdentity:
 def format_host_pipe(host_app: str, host_version: str, process_id: int) -> str:
     """Format a canonical ``DevTools_{Host}_{Version}_{PID}`` pipe name."""
     if (
-        not host_app.strip()
+        _is_dotnet_blank(host_app)
         or "_" in host_app
-        or not host_version.strip()
+        or _is_dotnet_blank(host_version)
         or "_" in host_version
         or isinstance(process_id, bool)
         or not isinstance(process_id, int)
@@ -43,13 +46,24 @@ def parse_host_pipe(name: str) -> HostIdentity:
         raise ValueError(f"Not a canonical host pipe: {name}")
     host_app, host_version, raw_pid = parts[1:]
     if (
-        not host_app.strip()
-        or not host_version.strip()
+        _is_dotnet_blank(host_app)
+        or _is_dotnet_blank(host_version)
         or not raw_pid.isdecimal()
         or int(raw_pid) <= 0
     ):
         raise ValueError(f"Not a canonical host pipe: {name}")
     return HostIdentity(name, host_app, host_version, int(raw_pid))
+
+
+def _is_dotnet_blank(value: str) -> bool:
+    return not value or all(_is_dotnet_whitespace(char) for char in value)
+
+
+def _is_dotnet_whitespace(char: str) -> bool:
+    return (
+        char in _DOTNET_CONTROL_WHITESPACE
+        or unicodedata.category(char) in _DOTNET_WHITESPACE_CATEGORIES
+    )
 
 
 def iter_host_pipe_names(
