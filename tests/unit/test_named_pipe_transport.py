@@ -8,7 +8,11 @@ import pytest
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage
 
-from revitdevtool_pytest.named_pipe_transport import _drain_complete_lines, named_pipe_streams
+from revitdevtool_pytest.named_pipe_transport import (
+    CaseEvent,
+    _drain_complete_lines,
+    named_pipe_streams,
+)
 
 
 class FakePipeHandle:
@@ -41,6 +45,25 @@ def test_drain_complete_lines_preserves_incomplete_tail() -> None:
 
     assert lines == [b'{"id":1}', b'{"id":2}']
     assert pending == b'{"id":3'
+
+
+def test_case_event_parser_keeps_typed_extension_fields() -> None:
+    event = CaseEvent.from_json_line(
+        b'{"jsonrpc":"2.0","method":"notifications/devtools/pytest/case",'
+        b'"params":{"progressToken":4,"sequence":2,"case":{"nodeid":"test_a"}}}'
+    )
+
+    assert event == CaseEvent(4, 2, {"nodeid": "test_a"})
+
+
+def test_case_event_parser_rejects_boolean_sequence() -> None:
+    raw = (
+        b'{"jsonrpc":"2.0","method":"notifications/devtools/pytest/case",'
+        b'"params":{"progressToken":4,"sequence":true,"case":{}}}'
+    )
+
+    with pytest.raises(ValueError, match="Invalid pytest case-event"):
+        CaseEvent.from_json_line(raw)
 
 
 @pytest.mark.anyio

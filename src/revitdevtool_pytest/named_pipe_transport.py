@@ -13,9 +13,19 @@ import anyio
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage
 
+from .constants import (
+    MCP_CASE_EVENT_CASE,
+    MCP_CASE_EVENT_METHOD,
+    MCP_CASE_EVENT_PROGRESS_TOKEN,
+    MCP_CASE_EVENT_SEQUENCE,
+    MCP_JSONRPC_FIELD,
+    MCP_JSONRPC_VERSION,
+    MCP_METHOD_FIELD,
+    MCP_PARAMS_FIELD,
+)
+
 _MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 _READ_SIZE = 64 * 1024
-_CASE_EVENT_METHOD = "notifications/devtools/pytest/case"
 
 
 class _PipeHandle(Protocol):
@@ -37,19 +47,12 @@ class CaseEvent:
     @classmethod
     def from_json_line(cls, line: bytes) -> CaseEvent:
         raw = json.loads(line)
-        params = raw.get("params")
-        if (
-            raw.get("jsonrpc") != "2.0"
-            or raw.get("method") != _CASE_EVENT_METHOD
-            or not isinstance(params, dict)
-            or not isinstance(params.get("progressToken"), (int, str))
-            or isinstance(params.get("progressToken"), bool)
-            or not isinstance(params.get("sequence"), int)
-            or isinstance(params.get("sequence"), bool)
-            or not isinstance(params.get("case"), dict)
-        ):
-            raise ValueError("Invalid pytest case-event notification")
-        return cls(params["progressToken"], params["sequence"], params["case"])
+        params = _validated_case_event_params(raw)
+        return cls(
+            params[MCP_CASE_EVENT_PROGRESS_TOKEN],
+            params[MCP_CASE_EVENT_SEQUENCE],
+            params[MCP_CASE_EVENT_CASE],
+        )
 
 
 CaseEventHandler = Callable[[CaseEvent], Awaitable[None] | None]
@@ -163,9 +166,35 @@ async def _write_messages(
 
 def _is_case_event(raw_line: bytes) -> bool:
     try:
-        return json.loads(raw_line).get("method") == _CASE_EVENT_METHOD
+        return json.loads(raw_line).get(MCP_METHOD_FIELD) == MCP_CASE_EVENT_METHOD
     except (UnicodeDecodeError, json.JSONDecodeError):
         return False
+
+
+def _validated_case_event_params(raw: Any) -> dict[str, Any]:
+    params = raw.get(MCP_PARAMS_FIELD)
+    if not _is_valid_case_event(raw, params):
+        raise ValueError("Invalid pytest case-event notification")
+    return params
+
+
+def _is_valid_case_event(raw: Any, params: Any) -> bool:
+    return (
+        raw.get(MCP_JSONRPC_FIELD) == MCP_JSONRPC_VERSION
+        and raw.get(MCP_METHOD_FIELD) == MCP_CASE_EVENT_METHOD
+        and isinstance(params, dict)
+        and _is_case_event_progress_token(params.get(MCP_CASE_EVENT_PROGRESS_TOKEN))
+        and _is_non_boolean_int(params.get(MCP_CASE_EVENT_SEQUENCE))
+        and isinstance(params.get(MCP_CASE_EVENT_CASE), dict)
+    )
+
+
+def _is_case_event_progress_token(value: Any) -> bool:
+    return isinstance(value, (int, str)) and not isinstance(value, bool)
+
+
+def _is_non_boolean_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _open_win32_pipe(pipe_name: str) -> Any:

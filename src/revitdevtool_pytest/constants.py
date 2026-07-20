@@ -3,11 +3,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version
 from typing import Final
 
 PLUGIN_NAME: Final = "RevitDevTool.PyTest"
+PACKAGE_DISTRIBUTION: Final = "revitdevtool_pytest"
+MCP_CLIENT_NAME: Final = PACKAGE_DISTRIBUTION.replace("_", "-")
+
+try:
+    PACKAGE_VERSION: Final = version(PACKAGE_DISTRIBUTION)
+except PackageNotFoundError:
+    PACKAGE_VERSION: Final = "0+unknown"
 
 PYTEST_TOOL_NAME: Final = "pytest_run"
+MCP_JSONRPC_VERSION: Final = "2.0"
+MCP_JSONRPC_FIELD: Final = "jsonrpc"
+MCP_METHOD_FIELD: Final = "method"
+MCP_PARAMS_FIELD: Final = "params"
+MCP_CASE_EVENT_METHOD: Final = "notifications/devtools/pytest/case"
+MCP_CASE_EVENT_PROGRESS_TOKEN: Final = "progressToken"
+MCP_CASE_EVENT_SEQUENCE: Final = "sequence"
+MCP_CASE_EVENT_CASE: Final = "case"
+MCP_CANCEL_REASON: Final = "pytest client stopped waiting"
+
+PYTEST_INVALID_RESPONSE_STATUS: Final = "pytest_invalid_response"
+PYTEST_INFRASTRUCTURE_ERROR_STATUS: Final = "pytest_infrastructure_error"
+
+
+def case_event_capabilities() -> dict[str, object]:
+    """Create an independent MCP experimental capability payload per session."""
+    return {"devtools": {"pytest": {"caseEvents": {"version": "1"}}}}
 
 OPT_HOST: Final = "host_name"
 OPT_VERSION: Final = "host_version"

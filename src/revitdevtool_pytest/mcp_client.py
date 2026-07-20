@@ -13,16 +13,18 @@ from mcp import ClientSession, types
 from mcp.shared.exceptions import McpError
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 
-from .constants import PYTEST_TOOL_NAME
+from .constants import (
+    MCP_CANCEL_REASON,
+    MCP_CLIENT_NAME,
+    PACKAGE_VERSION,
+    PYTEST_INFRASTRUCTURE_ERROR_STATUS,
+    PYTEST_INVALID_RESPONSE_STATUS,
+    PYTEST_TOOL_NAME,
+    case_event_capabilities,
+)
 from .models import CaseResult, RunRequest, RunResponse
 from .named_pipe_transport import CaseEvent, named_pipe_streams
 from .pipe_name import HostIdentity
-
-CASE_EVENTS_CAPABILITY = "devtools"
-_CASE_EVENTS_EXPERIMENTAL = {
-    CASE_EVENTS_CAPABILITY: {"pytest": {"caseEvents": {"version": "1"}}}
-}
-
 
 class HostIdentityMismatch(RuntimeError):
     pass
@@ -65,10 +67,10 @@ class PytestClientSession:
                     params=types.InitializeRequestParams(
                         protocolVersion=types.LATEST_PROTOCOL_VERSION,
                         capabilities=types.ClientCapabilities(
-                            experimental=_CASE_EVENTS_EXPERIMENTAL
+                            experimental=case_event_capabilities()
                         ),
                         clientInfo=types.Implementation(
-                            name="revitdevtool-pytest", version="0.3.1"
+                            name=MCP_CLIENT_NAME, version=PACKAGE_VERSION
                         ),
                     )
                 )
@@ -150,7 +152,7 @@ class PytestClientSession:
                         types.CancelledNotification(
                             params=types.CancelledNotificationParams(
                                 requestId=request_id,
-                                reason="pytest client stopped waiting",
+                                reason=MCP_CANCEL_REASON,
                             )
                         )
                     )
@@ -270,11 +272,11 @@ class HostMcpClient:
             )
             structured = result.structuredContent
             if not isinstance(structured, Mapping):
-                raise RemotePytestInfrastructureError("pytest_invalid_response")
+                raise RemotePytestInfrastructureError(PYTEST_INVALID_RESPONSE_STATUS)
             if result.isError:
                 status = structured.get("status")
                 raise RemotePytestInfrastructureError(
-                    status if isinstance(status, str) else "pytest_infrastructure_error"
+                    status if isinstance(status, str) else PYTEST_INFRASTRUCTURE_ERROR_STATUS
                 )
             return RunResponse.from_dict(dict(structured))
         except BaseException:

@@ -10,6 +10,11 @@ import anyio
 import pytest
 from mcp import ClientSession
 
+from revitdevtool_pytest.constants import (
+    MCP_CLIENT_NAME,
+    PACKAGE_VERSION,
+    case_event_capabilities,
+)
 from revitdevtool_pytest.mcp_client import (
     HostIdentityMismatch,
     HostMcpClient,
@@ -98,6 +103,15 @@ class LegacyFramePipe:
         pass
 
 
+def test_case_event_capabilities_are_not_shared_between_sessions() -> None:
+    first = case_event_capabilities()
+    first["devtools"]["pytest"]["caseEvents"]["version"] = "mutated"
+
+    assert case_event_capabilities() == {
+        "devtools": {"pytest": {"caseEvents": {"version": "1"}}}
+    }
+
+
 def test_connect_initializes_and_validates_server_identity() -> None:
     client = HostMcpClient(
         HostIdentity("DevTools_Revit_2025_7", "Revit", "2025", 7),
@@ -130,6 +144,8 @@ async def test_initialize_advertises_nested_case_event_capability() -> None:
     assert session.initialize_request.root.params.capabilities.experimental == {
         "devtools": {"pytest": {"caseEvents": {"version": "1"}}}
     }
+    assert session.initialize_request.root.params.clientInfo.name == MCP_CLIENT_NAME
+    assert session.initialize_request.root.params.clientInfo.version == PACKAGE_VERSION
 
 
 @pytest.mark.anyio
