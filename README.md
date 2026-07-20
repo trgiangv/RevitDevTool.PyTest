@@ -4,8 +4,10 @@
 [![Python](https://img.shields.io/pypi/pyversions/RevitDevTool.PyTest)](https://pypi.org/project/RevitDevTool.PyTest/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-pytest plugin for testing CAD/BIM API code inside host applications via RevitDevTool Named Pipe bridge.
-Supports Revit, AutoCAD-family, and any host exposing a DevToolsPipeServer pipe.
+pytest plugin for testing CAD/BIM API code inside host applications through a
+direct standard-MCP named-pipe session.
+Supports Revit, AutoCAD-family, and any host exposing the canonical
+`DevTools_{Host}_{Version}_{PID}` MCP pipe.
 Tests run inside a live host process — write standard pytest, execute remotely.
 
 ## Installation
@@ -21,6 +23,7 @@ pip install revitdevtool_pytest
 | Python | >= 3.10 |
 | pytest | >= 9.0 |
 | pywin32 | >= 311 |
+| mcp | >= 1, < 2 |
 
 ## Requirements
 
@@ -182,9 +185,11 @@ pixi run pytest
 
 1. pytest discovers and collects tests locally
 2. Plugin intercepts `pytest_runtestloop`, connects to the host via Named Pipe
-3. Test nodeids are sent to the host's `PytestRunner.py` (embedded in RevitDevTool)
+3. The plugin initializes MCP and invokes the host's reserved `pytest_run` tool
+   with the selected node IDs
 4. Tests execute inside the host's Python.NET environment with full API access
-5. Results (pass/fail/skip, stdout, stderr, tracebacks) are returned via pipe
+5. Results (pass/fail/skip, stdout, stderr, tracebacks) are returned as the
+   final MCP tool result; optional case events provide live reporting
 6. Plugin maps results back to standard pytest reports
 
 ## IDE Integration

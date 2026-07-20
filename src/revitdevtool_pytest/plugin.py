@@ -1,18 +1,19 @@
 """pytest plugin — redirect test execution to a running host instance.
 
 Thin hook orchestrator. Delegates to:
-- ``connection`` — bridge lifecycle, discovery, lease, launch, retry
+- ``connection`` — direct MCP lifecycle, discovery, lease, launch, retry
 - ``reporting``  — remote result <-> pytest report mapping
 - ``suite_lock`` — Windows Mutex + suite context resolution
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
-from .connection import ensure_bridge
+from .connection import ensure_host_client
 from .constants import (
     DEFAULT_HOST,
     DEFAULT_LAUNCH_TIMEOUT_S,
@@ -25,25 +26,23 @@ from .constants import (
     OPT_PIPE,
     OPT_TIMEOUT,
     OPT_VERSION,
-    OUTCOME_ERROR,
-    OUTCOME_FAILED,
     PHASE_CALL,
     PLUGIN_NAME,
 )
 from .models import CaseResult
-from .reporting import emit_item_reports, run_remote_session, skip_all
+from .reporting import ItemReportLifecycle, emit_item_reports, run_remote_session, skip_all
 from .suite_leasing import SuiteLeaseStore
 from .suite_lock import SuiteMutex, resolve_suite_context
 
 if TYPE_CHECKING:
-    from .bridge import HostBridge
     from .dialog_resolver import StartupDialogResolver
+    from .mcp_client import HostMcpClient
 
 # ---------------------------------------------------------------------------
 # Session state — only this file owns mutable globals
 # ---------------------------------------------------------------------------
 
-_bridge: HostBridge | None = None
+_client: HostMcpClient | None = None
 _dialog_resolver: StartupDialogResolver | None = None
 _lease_store: SuiteLeaseStore | None = None
 _suite_mutex = SuiteMutex()
@@ -51,7 +50,8 @@ _suite_mutex = SuiteMutex()
 # Stash keys for cross-hook communication
 _collect_only_key = pytest.StashKey[bool]()
 _remote_results_key = pytest.StashKey[dict[str, list[CaseResult]]]()
-_streamed_nodeids_key = pytest.StashKey[set[str]]()
+_streamed_nodeids_key = pytest.StashKey[set[tuple[str, str]]]()
+_report_lifecycle_key = pytest.StashKey[ItemReportLifecycle]()
 _remote_collection_failed_key = pytest.StashKey[bool]()
 _remote_collection_error_key = pytest.StashKey[str | None]()
 
@@ -119,12 +119,12 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.hookimpl(tryfirst=True)
-def pytest_runtestloop(session: pytest.Session) -> bool:
-    if session.config.stash.get(_collect_only_key, False):
-        return False
+def pytest_runtestloop(session: pytest.Session) -> bool | None:
+    if session.config.stash.get(_collect_only_key, False) or _is_local_unit_session(session):
+        return None
 
     host_name = _resolve_host_name(session.config)
-    if not _ensure_bridge(session, host_name):
+    if not _ensure_client(session, host_name):
         skip_all(session, f"Not connected to {host_name}")
     elif session.items:
         _dispatch_remote_run(session)
@@ -132,43 +132,37 @@ def pytest_runtestloop(session: pytest.Session) -> bool:
 
 
 @pytest.hookimpl(tryfirst=True)
-def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> bool:  # noqa
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> bool | None:  # noqa
     results_by_nodeid = item.session.stash.get(_remote_results_key, None)
     if results_by_nodeid is None:
-        return False
+        return None
 
     streamed = item.session.stash.get(_streamed_nodeids_key, set())
+    lifecycle = item.session.stash.get(_report_lifecycle_key, None)
     results = results_by_nodeid.get(item.nodeid, [])
 
-    if item.nodeid in streamed:
-        _count_failures(item, results)
-    else:
-        reports = emit_item_reports(
-            item, results,
-            collection_failed=item.session.stash.get(_remote_collection_failed_key, False),
-            collection_error_message=item.session.stash.get(_remote_collection_error_key, None),
-        )
-        for report in reports:
-            if report.when == PHASE_CALL and report.failed:
-                item.session.testsfailed += 1
+    reports = emit_item_reports(
+        item, results,
+        collection_failed=item.session.stash.get(_remote_collection_failed_key, False),
+        collection_error_message=item.session.stash.get(_remote_collection_error_key, None),
+        emitted_cases=streamed,
+        lifecycle=lifecycle,
+    )
+    for report in reports:
+        if report.when == PHASE_CALL and report.failed:
+            item.session.testsfailed += 1
     return True
 
 
-def _count_failures(item: pytest.Item, results: list[CaseResult]) -> None:
-    for r in results:
-        if r.phase == PHASE_CALL and r.outcome in {OUTCOME_FAILED, OUTCOME_ERROR}:
-            item.session.testsfailed += 1
-
-
 def pytest_unconfigure(config: pytest.Config) -> None:  # noqa
-    global _bridge, _dialog_resolver, _lease_store
+    global _client, _dialog_resolver, _lease_store
     _suite_mutex.release()
     if _dialog_resolver is not None:
         _dialog_resolver.stop()
         _dialog_resolver = None
-    if _bridge is not None:
-        _bridge.disconnect()
-        _bridge = None
+    if _client is not None:
+        _client.close()
+        _client = None
     _lease_store = None
 
 
@@ -178,14 +172,15 @@ def pytest_unconfigure(config: pytest.Config) -> None:  # noqa
 
 
 def _dispatch_remote_run(session: pytest.Session) -> None:
-    assert _bridge is not None
+    assert _client is not None
     per_test_timeout = _opt_float(session.config, OPT_TIMEOUT, OPT_TIMEOUT) or DEFAULT_TEST_TIMEOUT_S
 
-    results_by_nodeid, streamed_nodeids, collection_failed, collection_error = run_remote_session(
-        session, _bridge, per_test_timeout,
+    results_by_nodeid, streamed_nodeids, lifecycle, collection_failed, collection_error = run_remote_session(
+        session, _client, per_test_timeout,
     )
     session.stash[_remote_results_key] = results_by_nodeid
     session.stash[_streamed_nodeids_key] = streamed_nodeids
+    session.stash[_report_lifecycle_key] = lifecycle
     session.stash[_remote_collection_failed_key] = collection_failed
     session.stash[_remote_collection_error_key] = collection_error
 
@@ -194,8 +189,8 @@ def _dispatch_remote_run(session: pytest.Session) -> None:
         session.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
 
 
-def _ensure_bridge(session: pytest.Session, host_name: str) -> bool:
-    global _bridge, _dialog_resolver  # noqa: PLW0603
+def _ensure_client(session: pytest.Session, host_name: str) -> bool:
+    global _client, _dialog_resolver  # noqa: PLW0603
 
     config = session.config
     suite_key, suite_path = resolve_suite_context(session)
@@ -208,12 +203,12 @@ def _ensure_bridge(session: pytest.Session, host_name: str) -> bool:
         )
 
     force_launch = _opt_bool(config, OPT_LAUNCH, OPT_LAUNCH)
-    if force_launch and _bridge is not None:
-        _bridge.disconnect()
-        _bridge = None
+    if force_launch and _client is not None:
+        _client.close()
+        _client = None
 
-    result = ensure_bridge(
-        current_bridge=_bridge,
+    result = ensure_host_client(
+        current_client=_client,
         lease_store=_lease_store,
         launch_timeout_s=_opt_float(config, OPT_LAUNCH_TIMEOUT, OPT_LAUNCH_TIMEOUT) or DEFAULT_LAUNCH_TIMEOUT_S,
         host_name=host_name,
@@ -225,12 +220,12 @@ def _ensure_bridge(session: pytest.Session, host_name: str) -> bool:
     )
     if result.dialog_resolver is not None:
         _dialog_resolver = result.dialog_resolver
-    if result.error is not None and result.bridge is None:
+    if result.error is not None and result.client is None:
         pytest.exit(
             f"{PLUGIN_NAME}: Could not connect to {host_name}: {result.error}",
             returncode=EXIT_CODE_CONFIG_ERROR,
         )
-    _bridge = result.bridge
+    _client = result.client
     return result.ok
 
 
@@ -268,3 +263,11 @@ def _opt_bool(config: pytest.Config, cli: str, ini: str) -> bool:
 def _is_collect_only(config: pytest.Config) -> bool:
     option = getattr(config, "option", None)
     return bool(getattr(option, "collectonly", False))
+
+
+def _is_local_unit_session(session: pytest.Session) -> bool:
+    """Keep this repository's offline contract tests out of the host runner."""
+    repository_root = Path(__file__).resolve().parents[2]
+    if Path(session.config.rootpath).resolve() != repository_root:
+        return False
+    return bool(session.items) and all(item.nodeid.startswith("tests/unit/") for item in session.items)

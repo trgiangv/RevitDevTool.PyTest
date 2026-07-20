@@ -3,13 +3,36 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version
 from typing import Final
 
 PLUGIN_NAME: Final = "RevitDevTool.PyTest"
+PACKAGE_DISTRIBUTION: Final = "revitdevtool_pytest"
+MCP_CLIENT_NAME: Final = PACKAGE_DISTRIBUTION.replace("_", "-")
 
-BRIDGE_METHOD_TESTS_RUN: Final = "tests/run"
-BRIDGE_MSG_TYPE_NOTIFICATION: Final = "notification"
-BRIDGE_NOTIFY_TEST_PROGRESS: Final = "notifications/tests/progress"
+try:
+    PACKAGE_VERSION: Final = version(PACKAGE_DISTRIBUTION)
+except PackageNotFoundError:
+    PACKAGE_VERSION: Final = "0+unknown"
+
+PYTEST_TOOL_NAME: Final = "pytest_run"
+MCP_JSONRPC_VERSION: Final = "2.0"
+MCP_JSONRPC_FIELD: Final = "jsonrpc"
+MCP_METHOD_FIELD: Final = "method"
+MCP_PARAMS_FIELD: Final = "params"
+MCP_CASE_EVENT_METHOD: Final = "notifications/devtools/pytest/case"
+MCP_CASE_EVENT_PROGRESS_TOKEN: Final = "progressToken"
+MCP_CASE_EVENT_SEQUENCE: Final = "sequence"
+MCP_CASE_EVENT_CASE: Final = "case"
+MCP_CANCEL_REASON: Final = "pytest client stopped waiting"
+
+PYTEST_INVALID_RESPONSE_STATUS: Final = "pytest_invalid_response"
+PYTEST_INFRASTRUCTURE_ERROR_STATUS: Final = "pytest_infrastructure_error"
+
+
+def case_event_capabilities() -> dict[str, object]:
+    """Create an independent MCP experimental capability payload per session."""
+    return {"devtools": {"pytest": {"caseEvents": {"version": "1"}}}}
 
 OPT_HOST: Final = "host_name"
 OPT_VERSION: Final = "host_version"
@@ -23,14 +46,6 @@ DEFAULT_TEST_TIMEOUT_S: Final = 60.0
 DEFAULT_LAUNCH_TIMEOUT_S: Final = 120.0
 DEFAULT_CONNECT_TIMEOUT_MS: Final = 30_000
 DEFAULT_POLL_INTERVAL_S: Final = 2.0
-
-PIPE_DIR: Final = r"//./pipe"
-
-PIPE_PREFIX: Final = "DevTools"
-
-# Mirrors C# InstanceManager: DevTools_{Host}_{Version}_{PID}
-# Version is [^_]+ (any non-underscore chars) to support year, semver, etc.
-PIPE_PATTERN: Final = rf"^{PIPE_PREFIX}_(\w+)_([^_]+)_(\d+)$"
 
 EXIT_CODE_CONFIG_ERROR: Final = 4
 
@@ -155,7 +170,7 @@ def get_host_config(host_name: str) -> HostConfig:
 
     Returns a minimal config with pipe_prefix = host_name if the host
     is not in the registry. This allows connecting to any host that
-    exposes a DevToolsPipeServer pipe without pre-registration.
+    exposes a canonical host MCP pipe without pre-registration.
     """
     key = host_name.strip().lower()
     config = HOST_REGISTRY.get(key)

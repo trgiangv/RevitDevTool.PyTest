@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-07-20
+
+### Breaking
+
+- The plugin now connects directly to the host's canonical named-pipe MCP
+  endpoint and invokes `pytest_run`; local pytest collection remains local.
+- The retained `DevTools_{Host}_{Version}_{PID}` pipe name carries MCP only.
+  The old framed Python bridge is unsupported.
+- There is no four-byte fallback, protocol sniffing, alias, or daemon/Gateway
+  hop for pytest execution.
+- Upgrade this plugin with the compatible RevitDevTool 4.0.0 desktop release.
+  Gateway 2.0.0 rejects old tunnel-v1 daemons with
+  `unsupported_tunnel_protocol`.
+
+### Upgrade window
+
+Prepare the desktop installer and this plugin artifact, enter the declared
+maintenance window, deploy Gateway 2.0.0, then release and announce the
+matching desktop components. Do not mix this client with legacy bridge hosts.
+
+### Dependencies
+
+- MCP SDK support remains constrained to `mcp>=1,<2`.
+
 ## [0.3.0] - 2026-07-07
 
 ### Changed

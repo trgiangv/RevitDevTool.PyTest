@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "revitdevtool_pytest"
-version = "0.3.1"
-description = "pytest plugin for testing CAD/BIM API code inside host applications via RevitDevTool Named Pipe bridge"
+version = "0.4.0"
+description = "pytest plugin for testing CAD/BIM API code inside host applications via RevitDevTool MCP"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -24,7 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Testing",
 ]
-dependencies = ["pytest>=9.0", "pywin32>=311"]
+dependencies = ["pytest>=9.0", "pywin32>=311", "mcp>=1,<2"]
 
 [project.entry-points."pytest11"]
 revitdevtool = "revitdevtool_pytest.plugin"

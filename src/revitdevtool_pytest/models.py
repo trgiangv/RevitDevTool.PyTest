@@ -1,13 +1,10 @@
-"""Data models for the RevitDevTool bridge protocol.
+"""Domain models for pytest execution requests and responses.
 
-Mirrors ``RevitDevTool.McpParser.Models.BridgeMessage`` on the C# side
-and ``PytestContracts.cs`` response models.
+Mirrors the pytest contracts exposed by the host tool surface.
 """
 
 from __future__ import annotations
 
-import json
-import uuid
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, TypeVar
 
@@ -21,40 +18,6 @@ def _deserialize(cls: type[_T], data: dict[str, Any]) -> _T:
     Only works for flat dataclasses (no nested types).
     """
     return cls(**{f.name: data[f.name] for f in fields(cls) if f.name in data})  # type: ignore[arg-type]
-
-
-@dataclass(slots=True)
-class BridgeRequest:
-    method: str
-    params: dict[str, Any] | None = None
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
-
-    def to_json_bytes(self) -> bytes:
-        msg: dict[str, Any] = {
-            "type": "request",
-            "id": self.id,
-            "method": self.method,
-        }
-        if self.params is not None:
-            msg["params"] = self.params
-        return json.dumps(msg, ensure_ascii=False).encode("utf-8")
-
-
-@dataclass(frozen=True, slots=True)
-class BridgeResponse:
-    id: str
-    result: Any = None
-    is_error: bool = False
-    error_message: str = ""
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> BridgeResponse:
-        return cls(
-            id=data.get("id", ""),
-            result=data.get("result"),
-            is_error=data.get("isError", False),
-            error_message=data.get("errorMessage", ""),
-        )
 
 
 # -- Request contracts (mirrors PytestContracts.cs requests) -----------------
