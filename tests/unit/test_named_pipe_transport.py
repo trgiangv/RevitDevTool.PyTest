@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+from collections import deque
+import json
+import threading
+
+import pytest
+from mcp.shared.message import SessionMessage
+from mcp.types import JSONRPCMessage
+
+from revitdevtool_pytest.named_pipe_transport import named_pipe_streams
+
+
+class FakePipeHandle:
+    def __init__(self, reads: list[bytes]) -> None:
+        self._reads = deque(reads)
+        self.writes: list[bytes] = []
+
+    def read(self, _: int) -> bytes:
+        return self._reads.popleft() if self._reads else b""
+
+    def write(self, data: bytes) -> None:
+        self.writes.append(data)
+
+    def close(self) -> None:
+        pass
+
+
+def make_ping_session_message(request_id: int) -> SessionMessage:
+    return SessionMessage(
+        message=JSONRPCMessage.model_validate_json(
+            f'{{"jsonrpc":"2.0","id":{request_id},"method":"ping"}}'
+        )
+    )
+
+
+@pytest.mark.anyio
+async def test_transport_decodes_newline_delimited_mcp_message() -> None:
+    handle = FakePipeHandle([b'{"jsonrpc":"2.0","id":1,"result":{}}\n'])
+
+    async with named_pipe_streams(
+        "DevTools_Revit_2025_7", open_handle=lambda _: handle
+    ) as (read, _):
+        message = await read.receive()
+
+    assert message.message.root.id == 1
+
+
+@pytest.mark.anyio
+async def test_transport_writes_one_sdk_message_per_line() -> None:
+    handle = FakePipeHandle([])
+
+    async with named_pipe_streams(
+        "DevTools_Revit_2025_7", open_handle=lambda _: handle
+    ) as (_, write):
+        await write.send(make_ping_session_message(3))
+
+    assert len(handle.writes) == 1
+    assert handle.writes[0].endswith(b"\n")
+    assert json.loads(handle.writes[0]) == {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "ping",
+    }
+
+
+@pytest.mark.anyio
+async def test_transport_opens_pipe_handle_off_the_event_loop_thread() -> None:
+    handle = FakePipeHandle([])
+    opened_on: list[int] = []
+    main_thread = threading.get_ident()
+
+    def open_handle(_: str) -> FakePipeHandle:
+        opened_on.append(threading.get_ident())
+        return handle
+
+    async with named_pipe_streams("DevTools_Revit_2025_7", open_handle=open_handle):
+        pass
+
+    assert opened_on != [main_thread]
