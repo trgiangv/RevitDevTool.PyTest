@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from .connection import ensure_bridge
+from .connection import ensure_host_client
 from .constants import (
     DEFAULT_HOST,
     DEFAULT_LAUNCH_TIMEOUT_S,
@@ -25,8 +25,6 @@ from .constants import (
     OPT_PIPE,
     OPT_TIMEOUT,
     OPT_VERSION,
-    OUTCOME_ERROR,
-    OUTCOME_FAILED,
     PHASE_CALL,
     PLUGIN_NAME,
 )
@@ -36,14 +34,14 @@ from .suite_leasing import SuiteLeaseStore
 from .suite_lock import SuiteMutex, resolve_suite_context
 
 if TYPE_CHECKING:
-    from .bridge import HostBridge
     from .dialog_resolver import StartupDialogResolver
+    from .mcp_client import HostMcpClient
 
 # ---------------------------------------------------------------------------
 # Session state — only this file owns mutable globals
 # ---------------------------------------------------------------------------
 
-_bridge: HostBridge | None = None
+_client: HostMcpClient | None = None
 _dialog_resolver: StartupDialogResolver | None = None
 _lease_store: SuiteLeaseStore | None = None
 _suite_mutex = SuiteMutex()
@@ -51,7 +49,7 @@ _suite_mutex = SuiteMutex()
 # Stash keys for cross-hook communication
 _collect_only_key = pytest.StashKey[bool]()
 _remote_results_key = pytest.StashKey[dict[str, list[CaseResult]]]()
-_streamed_nodeids_key = pytest.StashKey[set[str]]()
+_streamed_nodeids_key = pytest.StashKey[set[tuple[str, str]]]()
 _remote_collection_failed_key = pytest.StashKey[bool]()
 _remote_collection_error_key = pytest.StashKey[str | None]()
 
@@ -124,7 +122,7 @@ def pytest_runtestloop(session: pytest.Session) -> bool:
         return False
 
     host_name = _resolve_host_name(session.config)
-    if not _ensure_bridge(session, host_name):
+    if not _ensure_client(session, host_name):
         skip_all(session, f"Not connected to {host_name}")
     elif session.items:
         _dispatch_remote_run(session)
@@ -140,35 +138,27 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
     streamed = item.session.stash.get(_streamed_nodeids_key, set())
     results = results_by_nodeid.get(item.nodeid, [])
 
-    if item.nodeid in streamed:
-        _count_failures(item, results)
-    else:
-        reports = emit_item_reports(
-            item, results,
-            collection_failed=item.session.stash.get(_remote_collection_failed_key, False),
-            collection_error_message=item.session.stash.get(_remote_collection_error_key, None),
-        )
-        for report in reports:
-            if report.when == PHASE_CALL and report.failed:
-                item.session.testsfailed += 1
+    reports = emit_item_reports(
+        item, results,
+        collection_failed=item.session.stash.get(_remote_collection_failed_key, False),
+        collection_error_message=item.session.stash.get(_remote_collection_error_key, None),
+        emitted_cases=streamed,
+    )
+    for report in reports:
+        if report.when == PHASE_CALL and report.failed:
+            item.session.testsfailed += 1
     return True
 
 
-def _count_failures(item: pytest.Item, results: list[CaseResult]) -> None:
-    for r in results:
-        if r.phase == PHASE_CALL and r.outcome in {OUTCOME_FAILED, OUTCOME_ERROR}:
-            item.session.testsfailed += 1
-
-
 def pytest_unconfigure(config: pytest.Config) -> None:  # noqa
-    global _bridge, _dialog_resolver, _lease_store
+    global _client, _dialog_resolver, _lease_store
     _suite_mutex.release()
     if _dialog_resolver is not None:
         _dialog_resolver.stop()
         _dialog_resolver = None
-    if _bridge is not None:
-        _bridge.disconnect()
-        _bridge = None
+    if _client is not None:
+        _client.close()
+        _client = None
     _lease_store = None
 
 
@@ -178,11 +168,11 @@ def pytest_unconfigure(config: pytest.Config) -> None:  # noqa
 
 
 def _dispatch_remote_run(session: pytest.Session) -> None:
-    assert _bridge is not None
+    assert _client is not None
     per_test_timeout = _opt_float(session.config, OPT_TIMEOUT, OPT_TIMEOUT) or DEFAULT_TEST_TIMEOUT_S
 
     results_by_nodeid, streamed_nodeids, collection_failed, collection_error = run_remote_session(
-        session, _bridge, per_test_timeout,
+        session, _client, per_test_timeout,
     )
     session.stash[_remote_results_key] = results_by_nodeid
     session.stash[_streamed_nodeids_key] = streamed_nodeids
@@ -194,8 +184,8 @@ def _dispatch_remote_run(session: pytest.Session) -> None:
         session.config.hook.pytest_runtest_protocol(item=item, nextitem=nextitem)
 
 
-def _ensure_bridge(session: pytest.Session, host_name: str) -> bool:
-    global _bridge, _dialog_resolver  # noqa: PLW0603
+def _ensure_client(session: pytest.Session, host_name: str) -> bool:
+    global _client, _dialog_resolver  # noqa: PLW0603
 
     config = session.config
     suite_key, suite_path = resolve_suite_context(session)
@@ -208,12 +198,12 @@ def _ensure_bridge(session: pytest.Session, host_name: str) -> bool:
         )
 
     force_launch = _opt_bool(config, OPT_LAUNCH, OPT_LAUNCH)
-    if force_launch and _bridge is not None:
-        _bridge.disconnect()
-        _bridge = None
+    if force_launch and _client is not None:
+        _client.close()
+        _client = None
 
-    result = ensure_bridge(
-        current_bridge=_bridge,
+    result = ensure_host_client(
+        current_client=_client,
         lease_store=_lease_store,
         launch_timeout_s=_opt_float(config, OPT_LAUNCH_TIMEOUT, OPT_LAUNCH_TIMEOUT) or DEFAULT_LAUNCH_TIMEOUT_S,
         host_name=host_name,
@@ -225,12 +215,12 @@ def _ensure_bridge(session: pytest.Session, host_name: str) -> bool:
     )
     if result.dialog_resolver is not None:
         _dialog_resolver = result.dialog_resolver
-    if result.error is not None and result.bridge is None:
+    if result.error is not None and result.client is None:
         pytest.exit(
             f"{PLUGIN_NAME}: Could not connect to {host_name}: {result.error}",
             returncode=EXIT_CODE_CONFIG_ERROR,
         )
-    _bridge = result.bridge
+    _client = result.client
     return result.ok
 
 

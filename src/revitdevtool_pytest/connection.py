@@ -1,8 +1,4 @@
-"""Bridge lifecycle — discover, connect, lease, launch, retry.
-
-Stateless module: every function receives what it needs as parameters.
-No ``global`` statements, no module-level mutable state.
-"""
+"""Host MCP client lifecycle: discovery, lease reuse, and launch."""
 
 from __future__ import annotations
 
@@ -10,49 +6,68 @@ import ctypes
 import ctypes.wintypes
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
 
-from .bridge import HostBridge
-from .constants import (
-    EXIT_CODE_CONFIG_ERROR,
-    PLUGIN_NAME,
-    get_host_config,
-)
-from .discovery import (
-    find_host_executable,
-    find_host_pipes,
-    start_host,
-    wait_for_host_pipe,
-)
+from .constants import EXIT_CODE_CONFIG_ERROR, PLUGIN_NAME, get_host_config
+from .discovery import HostInstance, find_host_executable, find_host_pipes, start_host, wait_for_host_pipe
+from .mcp_client import HostMcpClient
+from .pipe_name import HostIdentity, format_host_pipe, parse_host_pipe
 
 if TYPE_CHECKING:
     from .dialog_resolver import StartupDialogResolver
-    from .discovery import HostInstance
-    from .suite_leasing import SuiteLeaseStore
+    from .suite_leasing import SuiteLease, SuiteLeaseStore
 
 log = logging.getLogger(PLUGIN_NAME)
-
 CONNECT_RETRIES = 3
 CONNECT_RETRY_DELAY_S = 1.0
 
 
+class LeaseIdentityMismatch(RuntimeError):
+    """A persisted lease PID now represents another canonical host identity."""
+
+
 @dataclass
 class ConnectionResult:
-    bridge: HostBridge | None = None
+    client: HostMcpClient | None = None
+    instance: HostInstance | None = None
+    launched: bool = False
     dialog_resolver: StartupDialogResolver | None = None
-    error: ConnectionError | None = None
+    error: Exception | None = None
 
     @property
     def ok(self) -> bool:
-        return self.bridge is not None and self.bridge.connected
+        return self.client is not None
 
 
-def ensure_bridge(
+def ensure_client(
     *,
-    current_bridge: HostBridge | None,
+    current_client: HostMcpClient | None,
+    candidates: list[HostInstance],
+    host_name: str,
+    host_version: str | None,
+    connector: Callable[[str], HostMcpClient] = lambda name: connect_host(name),
+) -> ConnectionResult:
+    """Connect only the selected candidate, never probe every discovered pipe."""
+    if current_client is not None:
+        return ConnectionResult(client=current_client)
+
+    target = _select_candidate(candidates, host_name, host_version)
+    if target is None:
+        return ConnectionResult()
+    try:
+        client = connector(target.pipe_name)
+    except Exception as exc:  # noqa: BLE001 - connection diagnostics reach pytest
+        return ConnectionResult(instance=target, error=exc)
+    return ConnectionResult(client=client, instance=target)
+
+
+def ensure_host_client(
+    *,
+    current_client: HostMcpClient | None,
     lease_store: SuiteLeaseStore | None,
     launch_timeout_s: float,
     host_name: str,
@@ -62,253 +77,210 @@ def ensure_bridge(
     suite_path: str,
     force_launch: bool = False,
 ) -> ConnectionResult:
-    """Main entry point: return a connected bridge or an error.
-
-    When *force_launch* is True, skip reusing existing instances and always
-    spawn a fresh host process (requires --host-version).
-    """
-    if not force_launch and current_bridge is not None and current_bridge.connected:
-        return ConnectionResult(bridge=current_bridge)
+    """Return one identity-validated MCP client, reusing only a matching lease."""
+    if not force_launch and current_client is not None:
+        return ConnectionResult(client=current_client)
 
     if explicit_pipe and not force_launch:
         return _connect_explicit_pipe_or_exit(explicit_pipe)
 
-    return _connect_discovered_or_launched(
-        host_name=host_name,
-        suite_key=suite_key,
-        suite_path=suite_path,
-        lease_store=lease_store,
-        version=version,
-        launch_timeout_s=launch_timeout_s,
-        force_launch=force_launch,
-    )
-
-
-def _connect_discovered_or_launched(
-    *,
-    host_name: str,
-    suite_key: str,
-    suite_path: str,
-    lease_store: SuiteLeaseStore | None,
-    version: str | None,
-    launch_timeout_s: float,
-    force_launch: bool,
-) -> ConnectionResult:
     instances = instances_for_version(host_name, version)
-
     if not force_launch:
         if lease_store is not None:
-            bridge, _ = _try_reconnect_leased(host_name, lease_store, suite_key, suite_path, instances)
-            if bridge is not None:
-                return ConnectionResult(bridge=bridge)
+            leased = _try_reconnect_leased(host_name, lease_store, suite_key, suite_path, instances)
+            if leased is not None:
+                return leased
             instances = instances_for_version(host_name, version)
 
         free = lease_store.find_free(suite_key, instances) if lease_store else instances
-        bridge, error = _connect_and_lease(free, suite_key, suite_path, lease_store, "Assigned free instance")
-        if bridge is not None:
-            return ConnectionResult(bridge=bridge)
-        if error is not None:
-            return ConnectionResult(error=error)
+        connected = ensure_client(
+            current_client=None,
+            candidates=free,
+            host_name=host_name,
+            host_version=version,
+        )
+        if connected.ok:
+            _assign_lease(lease_store, suite_key, suite_path, connected.instance)
+            _log_assignment("Assigned free instance", suite_key, connected.instance)
+            return connected
+        if connected.error is not None:
+            return connected
 
     launch_version = _resolve_launch_version(host_name, version, instances)
-    result = auto_launch(host_name, launch_version, launch_timeout_s)
-    bridge, error = _connect_and_lease(
-        [result.launched_instance], suite_key, suite_path, lease_store, "Spawned and leased",
+    launched = auto_launch(host_name, launch_version, launch_timeout_s)
+    connected = ensure_client(
+        current_client=None,
+        candidates=[launched.instance],
+        host_name=host_name,
+        host_version=launch_version,
     )
-    return ConnectionResult(bridge=bridge, dialog_resolver=result.dialog_resolver, error=error)
+    connected.launched = connected.ok
+    connected.dialog_resolver = launched.dialog_resolver
+    if connected.ok:
+        _assign_lease(lease_store, suite_key, suite_path, connected.instance)
+        _log_assignment("Spawned and leased", suite_key, connected.instance)
+    return connected
 
 
 @dataclass
 class LaunchResult:
-    launched_instance: HostInstance
+    instance: HostInstance
     dialog_resolver: StartupDialogResolver | None = None
 
 
 def auto_launch(host_name: str, version: str, launch_timeout_s: float) -> LaunchResult:
     if find_host_executable(host_name, version) is None:
+        pytest.exit(f"{PLUGIN_NAME}: {host_name} {version} is not installed on this machine.", returncode=EXIT_CODE_CONFIG_ERROR)
+
+    process_id = start_host(host_name, version)
+    resolver = _start_dialog_resolver(process_id)
+    expected_pipe = format_host_pipe(get_host_config(host_name).pipe_prefix, version, process_id)
+    instance = wait_for_host_pipe(host_name, version, timeout_s=launch_timeout_s, process_id=process_id)
+    if instance is None or instance.pipe_name != expected_pipe:
         pytest.exit(
-            f"{PLUGIN_NAME}: {host_name} {version} is not installed on this machine.",
+            f"{PLUGIN_NAME}: {host_name} {version} launched but pipe {expected_pipe} did not appear within {launch_timeout_s}s.",
             returncode=EXIT_CODE_CONFIG_ERROR,
         )
+    time.sleep(2.0)
+    return LaunchResult(instance, resolver)
 
-    log.info("Launching %s %s...", host_name, version)
-    process_id = start_host(host_name, version)
 
-    dialog_resolver: StartupDialogResolver | None = None
+def _start_dialog_resolver(process_id: int) -> StartupDialogResolver | None:
     try:
         from .dialog_resolver import StartupDialogResolver
 
         resolver = StartupDialogResolver(process_id)
         resolver.start()
-        dialog_resolver = resolver
+        return resolver
     except ImportError:
-        pass
-
-    instance = wait_for_host_pipe(host_name, version, timeout_s=launch_timeout_s, process_id=process_id)
-    if instance is None:
-        pytest.exit(
-            f"{PLUGIN_NAME}: {host_name} {version} launched but Named Pipe did not appear within {launch_timeout_s}s.",
-            returncode=EXIT_CODE_CONFIG_ERROR,
-        )
-
-    # Pipe availability can precede full UI/API readiness during cold start.
-    time.sleep(2.0)
-
-    log.info("Connected to %s %s (pid=%d)", host_name, instance.version, instance.process_id)
-    return LaunchResult(launched_instance=instance, dialog_resolver=dialog_resolver)
+        return None
 
 
-# ---------------------------------------------------------------------------
-# Discovery helpers
-# ---------------------------------------------------------------------------
 def instances_for_version(host_name: str, version: str | None) -> list[HostInstance]:
     instances = find_host_pipes(host_name)
     if version is not None:
-        return [i for i in instances if i.version == version]
-    return sorted(instances, key=lambda i: i.version, reverse=True)
+        return [instance for instance in instances if instance.version == version]
+    return sorted(instances, key=lambda instance: (instance.version, instance.process_id), reverse=True)
 
 
-def find_instance_by_pid(
-    instances: list[HostInstance], process_id: int,
-) -> HostInstance | None:
-    for instance in instances:
-        if instance.process_id == process_id:
-            return instance
-    return None
+def reconnect_lease(lease: SuiteLease, *, candidates: list[HostInstance]) -> HostInstance:
+    """Resolve a lease only when its full canonical identity still exists."""
+    identity = parse_host_pipe(lease.pipe_name)
+    if identity.process_id != lease.process_id:
+        raise LeaseIdentityMismatch("lease PID does not match its pipe identity")
+    instance = next((item for item in candidates if item.process_id == lease.process_id), None)
+    if instance is None:
+        raise LeaseIdentityMismatch("leased PID is no longer discoverable")
+    current = parse_host_pipe(instance.pipe_name)
+    if current != identity:
+        raise LeaseIdentityMismatch("leased PID was reused by another host identity")
+    return instance
 
 
-def is_process_alive(process_id: int, host_name: str = "revit") -> bool:
-    """Check if process is alive AND matches the expected executable name.
-
-    Plain PID-alive checks are vulnerable to Windows PID reuse.
-    For hosts without a known exe_name, only checks PID liveness.
-    """
-    cfg = get_host_config(host_name)
-    expected_name = cfg.exe_name
-
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000  # noqa: N806
-    handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
-        PROCESS_QUERY_LIMITED_INFORMATION, False, int(process_id),
-    )
-    if handle == 0:
-        return False
-    try:
-        if expected_name is None:
-            return True
-        buf = ctypes.create_unicode_buffer(260)
-        size = ctypes.wintypes.DWORD(260)
-        ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(  # type: ignore[attr-defined]
-            handle, 0, buf, ctypes.byref(size),
-        )
-        if not ok:
-            return True  # can't verify name — assume alive conservatively
-        return buf.value.lower().endswith(f"\\{expected_name.lower()}")
-    finally:
-        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
-
-
-# ---------------------------------------------------------------------------
-# Lease + connect internals
-# ---------------------------------------------------------------------------
 def _try_reconnect_leased(
     host_name: str,
     store: SuiteLeaseStore,
     suite_key: str,
     suite_path: str,
     instances: list[HostInstance],
-) -> tuple[HostBridge | None, bool]:
-    """Try reconnecting to a previously-leased host instance."""
+) -> ConnectionResult | None:
     lease = store.get_suite_lease(suite_key)
     if lease is None:
-        return None, False
-
+        return None
     if not is_process_alive(lease.process_id, host_name):
         store.clear_suite(suite_key)
-        return None, False
-
-    leased_instance = find_instance_by_pid(instances, lease.process_id)
-    if leased_instance is None:
+        return None
+    try:
+        instance = reconnect_lease(lease, candidates=instances)
+    except (LeaseIdentityMismatch, ValueError):
         store.clear_suite(suite_key)
-        return None, False
-
-    bridge, _, _ = _connect_first_available([leased_instance])
-    if bridge is not None:
-        store.assign(suite_key, suite_path, leased_instance)
-        log.info(
-            "Reusing lease suite=%s pid=%d pipe=%s",
-            suite_key, leased_instance.process_id, leased_instance.pipe_name,
-        )
-        return bridge, True
-
-    store.clear_suite(suite_key)
-    return None, False
-
-
-def _connect_and_lease(
-    instances: list[HostInstance],
-    suite_key: str,
-    suite_path: str,
-    store: SuiteLeaseStore | None,
-    label: str,
-) -> tuple[HostBridge | None, ConnectionError | None]:
-    bridge, selected, connect_error = _connect_first_available(instances)
-    if bridge is None or selected is None:
-        return None, connect_error
-    if store:
-        store.assign(suite_key, suite_path, selected)
-    log.info(
-        "%s suite=%s pid=%d pipe=%s",
-        label, suite_key, selected.process_id, selected.pipe_name,
+        return None
+    connected = ensure_client(
+        current_client=None,
+        candidates=[instance],
+        host_name=host_name,
+        host_version=instance.version,
     )
-    return bridge, None
+    if not connected.ok:
+        store.clear_suite(suite_key)
+        return None
+    _assign_lease(store, suite_key, suite_path, instance)
+    _log_assignment("Reusing lease", suite_key, instance)
+    return connected
 
 
-def _connect_first_available(
-    instances: list[HostInstance],
-) -> tuple[HostBridge | None, HostInstance | None, ConnectionError | None]:
-    last_error: ConnectionError | None = None
-    for instance in instances:
+def connect_host(pipe_name: str) -> HostMcpClient:
+    """Parse identity before opening the pipe and validate it during MCP initialize."""
+    identity: HostIdentity = parse_host_pipe(pipe_name)
+    last_error: Exception | None = None
+    for attempt in range(CONNECT_RETRIES):
+        client = HostMcpClient(identity)
         try:
-            return connect_pipe(instance.pipe_name), instance, None
-        except ConnectionError as exc:
+            client.connect()
+            return client
+        except Exception as exc:  # noqa: BLE001 - retry transient pipe startup failures
+            client.close()
             last_error = exc
-    return None, None, last_error
+            if attempt < CONNECT_RETRIES - 1:
+                time.sleep(CONNECT_RETRY_DELAY_S)
+    assert last_error is not None
+    raise last_error
 
 
 def _connect_explicit_pipe_or_exit(pipe_name: str) -> ConnectionResult:
     try:
-        return ConnectionResult(bridge=connect_pipe(pipe_name))
-    except ConnectionError as exc:
-        pytest.exit(
-            f"{PLUGIN_NAME}: Could not connect to host: {exc}",
-            returncode=EXIT_CODE_CONFIG_ERROR,
+        identity = parse_host_pipe(pipe_name)
+        return ensure_client(
+            current_client=None,
+            candidates=[HostInstance(pipe_name, identity.host_app, identity.host_version, identity.process_id)],
+            host_name=identity.host_app,
+            host_version=identity.host_version,
         )
+    except ValueError as exc:
+        pytest.exit(f"{PLUGIN_NAME}: Invalid host pipe: {exc}", returncode=EXIT_CODE_CONFIG_ERROR)
 
 
-def connect_pipe(pipe_name: str) -> HostBridge:
-    last_exc: ConnectionError | None = None
-    for attempt in range(CONNECT_RETRIES):
-        bridge = HostBridge(pipe_name)
-        try:
-            bridge.connect()
-            return bridge
-        except ConnectionError as exc:
-            bridge.disconnect()
-            last_exc = exc
-            if attempt < CONNECT_RETRIES - 1:
-                log.debug("Pipe connect attempt %d failed, retrying...", attempt + 1)
-                time.sleep(CONNECT_RETRY_DELAY_S)
-    raise last_exc  # type: ignore[misc]
+def _select_candidate(candidates: list[HostInstance], host_name: str, host_version: str | None) -> HostInstance | None:
+    cfg = get_host_config(host_name)
+    matches = [
+        candidate for candidate in candidates
+        if candidate.host_name.lower() == host_name.lower()
+        and parse_host_pipe(candidate.pipe_name).host_app.lower() == cfg.pipe_prefix.lower()
+        and (host_version is None or candidate.version == host_version)
+    ]
+    return max(matches, key=lambda candidate: candidate.process_id) if matches else None
 
 
-def _resolve_launch_version(
-    host_name: str, version: str | None, instances: list[HostInstance],
-) -> str:
+def _assign_lease(store: SuiteLeaseStore | None, suite_key: str, suite_path: str, instance: HostInstance | None) -> None:
+    if store is not None and instance is not None:
+        store.assign(suite_key, suite_path, instance)
+
+
+def _log_assignment(label: str, suite_key: str, instance: HostInstance | None) -> None:
+    if instance is not None:
+        log.info("%s suite=%s pid=%d pipe=%s", label, suite_key, instance.process_id, instance.pipe_name)
+
+
+def is_process_alive(process_id: int, host_name: str = "revit") -> bool:
+    cfg = get_host_config(host_name)
+    handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(process_id))  # type: ignore[attr-defined]
+    if handle == 0:
+        return False
+    try:
+        if cfg.exe_name is None:
+            return True
+        path = ctypes.create_unicode_buffer(260)
+        size = ctypes.wintypes.DWORD(260)
+        if not ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, path, ctypes.byref(size)):  # type: ignore[attr-defined]
+            return True
+        return path.value.lower().endswith(f"\\{cfg.exe_name.lower()}")
+    finally:
+        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+
+
+def _resolve_launch_version(host_name: str, version: str | None, instances: list[HostInstance]) -> str:
     if version is not None:
         return version
     if instances:
-        return max(instances, key=lambda i: i.version).version
-    pytest.exit(
-        f"{PLUGIN_NAME}: --host-version is required when no existing {host_name} instances are available.",
-        returncode=EXIT_CODE_CONFIG_ERROR,
-    )
+        return max(instances, key=lambda instance: instance.version).version
+    pytest.exit(f"{PLUGIN_NAME}: --host-version is required when no existing {host_name} instances are available.", returncode=EXIT_CODE_CONFIG_ERROR)
