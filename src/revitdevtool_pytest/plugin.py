@@ -29,7 +29,7 @@ from .constants import (
     PLUGIN_NAME,
 )
 from .models import CaseResult
-from .reporting import emit_item_reports, run_remote_session, skip_all
+from .reporting import ItemReportLifecycle, emit_item_reports, run_remote_session, skip_all
 from .suite_leasing import SuiteLeaseStore
 from .suite_lock import SuiteMutex, resolve_suite_context
 
@@ -50,6 +50,7 @@ _suite_mutex = SuiteMutex()
 _collect_only_key = pytest.StashKey[bool]()
 _remote_results_key = pytest.StashKey[dict[str, list[CaseResult]]]()
 _streamed_nodeids_key = pytest.StashKey[set[tuple[str, str]]]()
+_report_lifecycle_key = pytest.StashKey[ItemReportLifecycle]()
 _remote_collection_failed_key = pytest.StashKey[bool]()
 _remote_collection_error_key = pytest.StashKey[str | None]()
 
@@ -136,6 +137,7 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
         return False
 
     streamed = item.session.stash.get(_streamed_nodeids_key, set())
+    lifecycle = item.session.stash.get(_report_lifecycle_key, None)
     results = results_by_nodeid.get(item.nodeid, [])
 
     reports = emit_item_reports(
@@ -143,6 +145,7 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> 
         collection_failed=item.session.stash.get(_remote_collection_failed_key, False),
         collection_error_message=item.session.stash.get(_remote_collection_error_key, None),
         emitted_cases=streamed,
+        lifecycle=lifecycle,
     )
     for report in reports:
         if report.when == PHASE_CALL and report.failed:
@@ -171,11 +174,12 @@ def _dispatch_remote_run(session: pytest.Session) -> None:
     assert _client is not None
     per_test_timeout = _opt_float(session.config, OPT_TIMEOUT, OPT_TIMEOUT) or DEFAULT_TEST_TIMEOUT_S
 
-    results_by_nodeid, streamed_nodeids, collection_failed, collection_error = run_remote_session(
+    results_by_nodeid, streamed_nodeids, lifecycle, collection_failed, collection_error = run_remote_session(
         session, _client, per_test_timeout,
     )
     session.stash[_remote_results_key] = results_by_nodeid
     session.stash[_streamed_nodeids_key] = streamed_nodeids
+    session.stash[_report_lifecycle_key] = lifecycle
     session.stash[_remote_collection_failed_key] = collection_failed
     session.stash[_remote_collection_error_key] = collection_error
 

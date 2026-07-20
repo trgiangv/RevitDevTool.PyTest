@@ -51,6 +51,26 @@ class CaseStreamTracker:
             self.on_case(result)
 
 
+class ItemReportLifecycle:
+    """Keep pytest's per-item log lifecycle balanced across live and final reports."""
+
+    def __init__(self) -> None:
+        self._started: set[str] = set()
+        self._finished: set[str] = set()
+
+    def start(self, item: pytest.Item) -> None:
+        if item.nodeid in self._started:
+            return
+        item.ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
+        self._started.add(item.nodeid)
+
+    def finish(self, item: pytest.Item) -> None:
+        if item.nodeid not in self._started or item.nodeid in self._finished:
+            return
+        item.ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+        self._finished.add(item.nodeid)
+
+
 # ---------------------------------------------------------------------------
 # Remote session execution
 # ---------------------------------------------------------------------------
@@ -60,7 +80,7 @@ def run_remote_session(
     session: pytest.Session,
     client: HostMcpClient,
     timeout_per_test: float,
-) -> tuple[dict[str, list[CaseResult]], set[tuple[str, str]], bool, str | None]:
+) -> tuple[dict[str, list[CaseResult]], set[tuple[str, str]], ItemReportLifecycle, bool, str | None]:
     """Run tests remotely, streaming progress as it arrives.
 
     Returns ``(results_by_nodeid, streamed_nodeids, collection_failed, error_msg)``.
@@ -70,9 +90,10 @@ def run_remote_session(
     workspace_root = str(session.config.rootdir)
     total_timeout = timeout_per_test * max(len(session.items), 1)
     nodeids = [item.nodeid for item in session.items]
+    lifecycle = ItemReportLifecycle()
     stream = CaseStreamTracker(
         lambda result: _emit_streaming_report(
-            result, {item.nodeid: item for item in session.items}, stream.emitted
+            result, {item.nodeid: item for item in session.items}, stream.emitted, lifecycle
         )
     )
     on_case = None if _is_ide_adapter_active(session) else stream.on_case
@@ -86,17 +107,17 @@ def run_remote_session(
     )
     if response is None:
         fail_all(session, f"{PLUGIN_NAME}: Remote execution failed.")
-        return {}, stream.emitted, False, None
+        return {}, stream.emitted, lifecycle, False, None
 
     collection_error_message = _report_collection_errors(session, response)
     if _is_global_collection_failure(response):
-        return {}, stream.emitted, True, collection_error_message
+        return {}, stream.emitted, lifecycle, True, collection_error_message
 
     results_by_nodeid: dict[str, list[CaseResult]] = {}
     for r in response.results:
         results_by_nodeid.setdefault(r.nodeid, []).append(r)
 
-    return results_by_nodeid, stream.emitted, False, None
+    return results_by_nodeid, stream.emitted, lifecycle, False, None
 
 
 def _build_progress_callback(session: pytest.Session) -> Callable[..., None] | None:
@@ -163,6 +184,7 @@ def _emit_streaming_report(
     result: CaseResult,
     items_by_nodeid: dict[str, pytest.Item],
     streamed: set[tuple[str, str]],
+    lifecycle: ItemReportLifecycle,
 ) -> None:
     """Emit a live TestReport from a progress notification (CLI only).
 
@@ -175,18 +197,15 @@ def _emit_streaming_report(
         if item is None:
             return
 
-        ihook = item.ihook
         key = (result.nodeid, result.phase)
-        is_first = not any(nodeid == result.nodeid for nodeid, _ in streamed)
-        if is_first:
-            ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
+        lifecycle.start(item)
 
         report = make_report(item, result)
-        ihook.pytest_runtest_logreport(report=report)
+        item.ihook.pytest_runtest_logreport(report=report)
         streamed.add(key)
 
-        if result.phase in {"call", "teardown"}:
-            ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+        if result.phase == "teardown":
+            lifecycle.finish(item)
     except Exception:  # noqa: BLE001
         log.debug("Failed to emit streaming report", exc_info=True)
 
@@ -203,6 +222,7 @@ def emit_item_reports(
     collection_failed: bool,
     collection_error_message: str | None,
     emitted_cases: set[tuple[str, str]] | None = None,
+    lifecycle: ItemReportLifecycle | None = None,
 ) -> list[pytest.TestReport]:
     if collection_failed:
         message = collection_error_message or "Remote collection failed before test execution."
@@ -213,14 +233,11 @@ def emit_item_reports(
         already_emitted = emitted_cases or set()
         pending = [make_report(item, result) for result in results if (result.nodeid, result.phase) not in already_emitted]
 
-    if not pending:
-        return []
-
-    ihook = item.ihook
-    ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
-    reports = [_emit_single(ihook, report) for report in pending]
-
-    ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+    current_lifecycle = lifecycle or ItemReportLifecycle()
+    if pending:
+        current_lifecycle.start(item)
+    reports = [_emit_single(item.ihook, report) for report in pending]
+    current_lifecycle.finish(item)
     return reports
 
 
