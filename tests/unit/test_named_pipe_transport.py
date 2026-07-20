@@ -8,7 +8,7 @@ import pytest
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage
 
-from revitdevtool_pytest.named_pipe_transport import named_pipe_streams
+from revitdevtool_pytest.named_pipe_transport import _drain_complete_lines, named_pipe_streams
 
 
 class FakePipeHandle:
@@ -32,6 +32,15 @@ def make_ping_session_message(request_id: int) -> SessionMessage:
             f'{{"jsonrpc":"2.0","id":{request_id},"method":"ping"}}'
         )
     )
+
+
+def test_drain_complete_lines_preserves_incomplete_tail() -> None:
+    pending = bytearray(b'{"id":1}\n{"id":2}\n{"id":3')
+
+    lines = _drain_complete_lines(pending)
+
+    assert lines == [b'{"id":1}', b'{"id":2}']
+    assert pending == b'{"id":3'
 
 
 @pytest.mark.anyio

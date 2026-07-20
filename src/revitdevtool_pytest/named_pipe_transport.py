@@ -100,25 +100,49 @@ async def _read_messages(
             chunk = await anyio.to_thread.run_sync(_read_handle, handle, _READ_SIZE)
             if not chunk:
                 return
-            pending.extend(chunk)
-            if len(pending) > _MAX_MESSAGE_BYTES and b"\n" not in pending:
-                raise ValueError("MCP message exceeds 4 MiB")
-            while b"\n" in pending:
-                raw_line, _, remainder = pending.partition(b"\n")
-                pending = bytearray(remainder)
-                if len(raw_line) > _MAX_MESSAGE_BYTES:
-                    raise ValueError("MCP message exceeds 4 MiB")
-                if not raw_line:
-                    continue
-                if _is_case_event(raw_line):
-                    if on_case_event is not None:
-                        result = on_case_event(CaseEvent.from_json_line(raw_line))
-                        if inspect.isawaitable(result):
-                            await result
-                    continue
-                await destination.send(SessionMessage(message=JSONRPCMessage.model_validate_json(raw_line)))
+            _append_chunk(pending, chunk)
+            for raw_line in _drain_complete_lines(pending):
+                await _deliver_line(raw_line, destination, on_case_event)
     finally:
         await destination.aclose()
+
+
+def _append_chunk(pending: bytearray, chunk: bytes) -> None:
+    pending.extend(chunk)
+    if len(pending) > _MAX_MESSAGE_BYTES and b"\n" not in pending:
+        raise ValueError("MCP message exceeds 4 MiB")
+
+
+def _drain_complete_lines(pending: bytearray) -> list[bytes]:
+    lines: list[bytes] = []
+    while b"\n" in pending:
+        raw_line, _, remainder = pending.partition(b"\n")
+        pending[:] = remainder
+        if len(raw_line) > _MAX_MESSAGE_BYTES:
+            raise ValueError("MCP message exceeds 4 MiB")
+        lines.append(raw_line)
+    return lines
+
+
+async def _deliver_line(
+    raw_line: bytes,
+    destination: anyio.abc.ObjectSendStream[SessionMessage],
+    on_case_event: CaseEventHandler | None,
+) -> None:
+    if not raw_line:
+        return
+    if _is_case_event(raw_line):
+        await _deliver_case_event(raw_line, on_case_event)
+        return
+    await destination.send(SessionMessage(message=JSONRPCMessage.model_validate_json(raw_line)))
+
+
+async def _deliver_case_event(raw_line: bytes, on_case_event: CaseEventHandler | None) -> None:
+    if on_case_event is None:
+        return
+    result = on_case_event(CaseEvent.from_json_line(raw_line))
+    if inspect.isawaitable(result):
+        await result
 
 
 async def _write_messages(
