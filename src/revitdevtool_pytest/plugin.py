@@ -8,6 +8,7 @@ Thin hook orchestrator. Delegates to:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -118,9 +119,9 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 @pytest.hookimpl(tryfirst=True)
-def pytest_runtestloop(session: pytest.Session) -> bool:
-    if session.config.stash.get(_collect_only_key, False):
-        return False
+def pytest_runtestloop(session: pytest.Session) -> bool | None:
+    if session.config.stash.get(_collect_only_key, False) or _is_local_unit_session(session):
+        return None
 
     host_name = _resolve_host_name(session.config)
     if not _ensure_client(session, host_name):
@@ -131,10 +132,10 @@ def pytest_runtestloop(session: pytest.Session) -> bool:
 
 
 @pytest.hookimpl(tryfirst=True)
-def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> bool:  # noqa
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None) -> bool | None:  # noqa
     results_by_nodeid = item.session.stash.get(_remote_results_key, None)
     if results_by_nodeid is None:
-        return False
+        return None
 
     streamed = item.session.stash.get(_streamed_nodeids_key, set())
     lifecycle = item.session.stash.get(_report_lifecycle_key, None)
@@ -262,3 +263,11 @@ def _opt_bool(config: pytest.Config, cli: str, ini: str) -> bool:
 def _is_collect_only(config: pytest.Config) -> bool:
     option = getattr(config, "option", None)
     return bool(getattr(option, "collectonly", False))
+
+
+def _is_local_unit_session(session: pytest.Session) -> bool:
+    """Keep this repository's offline contract tests out of the host runner."""
+    repository_root = Path(__file__).resolve().parents[2]
+    if Path(session.config.rootpath).resolve() != repository_root:
+        return False
+    return bool(session.items) and all(item.nodeid.startswith("tests/unit/") for item in session.items)

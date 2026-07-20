@@ -8,7 +8,6 @@ from typing import Final
 PLUGIN_NAME: Final = "RevitDevTool.PyTest"
 
 PYTEST_TOOL_NAME: Final = "pytest_run"
-CASE_EVENT_METHOD: Final = "notifications/tests/progress"
 
 OPT_HOST: Final = "host_name"
 OPT_VERSION: Final = "host_version"
