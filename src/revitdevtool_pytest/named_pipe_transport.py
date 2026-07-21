@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage
 
 from .constants import (
+    DEFAULT_CONNECT_TIMEOUT_MS,
     MCP_CASE_EVENT_CASE,
     MCP_CASE_EVENT_METHOD,
     MCP_CASE_EVENT_PROGRESS_TOKEN,
@@ -64,6 +66,7 @@ CaseEventHandler = Callable[[CaseEvent], Awaitable[None] | None]
 async def named_pipe_streams(
     pipe_name: str,
     *,
+    open_timeout_ms: int = DEFAULT_CONNECT_TIMEOUT_MS,
     open_handle: Callable[[str], Any] | None = None,
     on_case_event: CaseEventHandler | None = None,
 ) -> AsyncIterator[
@@ -73,7 +76,8 @@ async def named_pipe_streams(
     ]
 ]:
     """Expose a byte-mode pipe as the MCP SDK's session-message streams."""
-    handle = await anyio.to_thread.run_sync(open_handle or _open_win32_pipe, pipe_name)
+    opener = open_handle or (lambda name: _open_win32_pipe(name, timeout_ms=open_timeout_ms))
+    handle = await anyio.to_thread.run_sync(opener, pipe_name)
     incoming_send, incoming_receive = anyio.create_memory_object_stream[SessionMessage](0)
     outgoing_send, outgoing_receive = anyio.create_memory_object_stream[SessionMessage](0)
     writer_finished = anyio.Event()
@@ -200,21 +204,38 @@ def _is_non_boolean_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _open_win32_pipe(pipe_name: str) -> Any:
+def _open_win32_pipe(pipe_name: str, *, timeout_ms: int = DEFAULT_CONNECT_TIMEOUT_MS) -> Any:
+    import pywintypes  # type: ignore[import-untyped]
     import win32file  # type: ignore[import-untyped]
     import win32pipe  # type: ignore[import-untyped]
 
-    handle = win32file.CreateFile(
-        rf"\\.\pipe\{pipe_name}",
-        win32file.GENERIC_READ | win32file.GENERIC_WRITE,
-        0,
-        None,
-        win32file.OPEN_EXISTING,
-        0,
-        None,
-    )
-    win32pipe.SetNamedPipeHandleState(handle, win32pipe.PIPE_READMODE_BYTE, None, None)
-    return handle
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
+    path = rf"\\.\pipe\{pipe_name}"
+    last_error: BaseException | None = None
+    while True:
+        try:
+            handle = win32file.CreateFile(
+                path,
+                win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                0,
+                None,
+                win32file.OPEN_EXISTING,
+                0,
+                None,
+            )
+            win32pipe.SetNamedPipeHandleState(handle, win32pipe.PIPE_READMODE_BYTE, None, None)
+            return handle
+        except pywintypes.error as exc:
+            last_error = exc
+            if exc.winerror not in (2, 231):  # ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY
+                raise
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                break
+            time.sleep(min(0.1, remaining_s))
+    if last_error is not None:
+        raise last_error
+    raise TimeoutError(f"Timed out opening pipe {pipe_name} after {timeout_ms}ms")
 
 
 def _read_handle(handle: Any, size: int) -> bytes:

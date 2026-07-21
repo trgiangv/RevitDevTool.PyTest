@@ -14,6 +14,7 @@ from mcp.shared.exceptions import McpError
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 
 from .constants import (
+    DEFAULT_CONNECT_TIMEOUT_MS,
     MCP_CANCEL_REASON,
     MCP_CLIENT_NAME,
     PACKAGE_VERSION,
@@ -167,9 +168,11 @@ class HostMcpClient:
         identity: HostIdentity,
         *,
         transport: Callable[..., AbstractAsyncContextManager[Any]] = named_pipe_streams,
+        connect_timeout_ms: int = DEFAULT_CONNECT_TIMEOUT_MS,
     ) -> None:
         self._identity = identity
         self._transport = transport
+        self._connect_timeout_ms = connect_timeout_ms
         self._portal_context: Any = None
         self._portal: BlockingPortal | None = None
         self._transport_context: AbstractAsyncContextManager[Any] | None = None
@@ -225,7 +228,9 @@ class HostMcpClient:
 
     async def _connect_async(self) -> None:
         self._transport_context = self._transport(
-            self._identity.pipe_name, on_case_event=self._receive_case_event
+            self._identity.pipe_name,
+            open_timeout_ms=self._connect_timeout_ms,
+            on_case_event=self._receive_case_event,
         )
         streams = await self._transport_context.__aenter__()
         if hasattr(self._transport, "create_session"):

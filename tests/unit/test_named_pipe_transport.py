@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 import json
 import threading
+from unittest.mock import MagicMock
 
 import pytest
 from mcp.shared.message import SessionMessage
@@ -12,6 +13,7 @@ from revitdevtool_pytest.named_pipe_transport import (
     CaseEvent,
     _drain_complete_lines,
     _is_case_event,
+    _open_win32_pipe,
     named_pipe_streams,
 )
 
@@ -128,3 +130,38 @@ async def test_transport_opens_pipe_handle_off_the_event_loop_thread() -> None:
         pass
 
     assert opened_on != [main_thread]
+
+
+def test_open_win32_pipe_retries_until_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeError(Exception):
+        def __init__(self, winerror: int) -> None:
+            self.winerror = winerror
+
+    fake_pywintypes = MagicMock()
+    fake_pywintypes.error = FakeError
+    monkeypatch.setitem(__import__("sys").modules, "pywintypes", fake_pywintypes)
+
+    attempts = {"count": 0}
+
+    def fake_create_file(*_args: object, **_kwargs: object) -> object:
+        attempts["count"] += 1
+        raise FakeError(231)
+
+    fake_win32file = MagicMock()
+    fake_win32file.CreateFile = fake_create_file
+    fake_win32file.GENERIC_READ = 1
+    fake_win32file.GENERIC_WRITE = 2
+    fake_win32file.OPEN_EXISTING = 3
+    monkeypatch.setitem(__import__("sys").modules, "win32file", fake_win32file)
+    monkeypatch.setitem(__import__("sys").modules, "win32pipe", MagicMock())
+
+    monkeypatch.setattr(
+        "revitdevtool_pytest.named_pipe_transport.time.monotonic",
+        iter([0.0, 0.0, 0.05, 0.05, 0.2, 0.2]).__next__,
+    )
+    monkeypatch.setattr("revitdevtool_pytest.named_pipe_transport.time.sleep", lambda _: None)
+
+    with pytest.raises(FakeError):
+        _open_win32_pipe("DevTools_Revit_2025_7", timeout_ms=100)
+
+    assert attempts["count"] >= 2
