@@ -55,6 +55,25 @@ def parse_host_pipe(name: str) -> HostIdentity:
     return HostIdentity(name, host_app, host_version, int(raw_pid))
 
 
+def host_segments_equal(left: str, right: str) -> bool:
+    """Compare host segments for discovery/matching (case-insensitive)."""
+    return left.lower() == right.lower()
+
+
+def version_segments_equal(left: str, right: str) -> bool:
+    """Compare version segments for discovery/matching (case-insensitive)."""
+    return left.lower() == right.lower()
+
+
+def identities_equal(left: HostIdentity, right: HostIdentity) -> bool:
+    """Compare parsed identities; host/version are case-insensitive."""
+    return (
+        left.process_id == right.process_id
+        and host_segments_equal(left.host_app, right.host_app)
+        and version_segments_equal(left.host_version, right.host_version)
+    )
+
+
 def _is_dotnet_blank(value: str) -> bool:
     return not value or all(_is_dotnet_whitespace(char) for char in value)
 
