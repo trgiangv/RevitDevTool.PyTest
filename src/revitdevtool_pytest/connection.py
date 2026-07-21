@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from .constants import EXIT_CODE_CONFIG_ERROR, PLUGIN_NAME, get_host_config
+from .constants import DEFAULT_CONNECT_TIMEOUT_MS, EXIT_CODE_CONFIG_ERROR, PLUGIN_NAME, get_host_config
 from .discovery import HostInstance, find_host_executable, find_host_pipes, start_host, wait_for_host_pipe
 from .mcp_client import HostMcpClient
 from .pipe_name import HostIdentity, format_host_pipe, parse_host_pipe
@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from .suite_leasing import SuiteLease, SuiteLeaseStore
 
 log = logging.getLogger(PLUGIN_NAME)
-CONNECT_RETRIES = 3
 CONNECT_RETRY_DELAY_S = 1.0
 
 
@@ -141,7 +140,6 @@ def auto_launch(host_name: str, version: str, launch_timeout_s: float) -> Launch
             f"{PLUGIN_NAME}: {host_name} {version} launched but pipe {expected_pipe} did not appear within {launch_timeout_s}s.",
             returncode=EXIT_CODE_CONFIG_ERROR,
         )
-    time.sleep(2.0)
     return LaunchResult(instance, resolver)
 
 
@@ -209,20 +207,30 @@ def _try_reconnect_leased(
     return connected
 
 
-def connect_host(pipe_name: str) -> HostMcpClient:
+def connect_host(
+    pipe_name: str,
+    *,
+    timeout_ms: int = DEFAULT_CONNECT_TIMEOUT_MS,
+) -> HostMcpClient:
     """Parse identity before opening the pipe and validate it during MCP initialize."""
     identity: HostIdentity = parse_host_pipe(pipe_name)
+    deadline = time.monotonic() + (timeout_ms / 1000.0)
     last_error: Exception | None = None
-    for attempt in range(CONNECT_RETRIES):
-        client = HostMcpClient(identity)
+    while True:
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            break
+        client = HostMcpClient(identity, connect_timeout_ms=remaining_ms)
         try:
             client.connect()
             return client
         except Exception as exc:  # noqa: BLE001 - retry transient pipe startup failures
             client.close()
             last_error = exc
-            if attempt < CONNECT_RETRIES - 1:
-                time.sleep(CONNECT_RETRY_DELAY_S)
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                break
+            time.sleep(min(CONNECT_RETRY_DELAY_S, remaining_s))
     assert last_error is not None
     raise last_error
 
