@@ -13,6 +13,7 @@ from mcp import ClientSession, types
 from mcp.shared.exceptions import McpError
 from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 
+from .compatibility import require_host_protocol_version
 from .constants import (
     DEFAULT_CONNECT_TIMEOUT_MS,
     MCP_CANCEL_REASON,
@@ -240,6 +241,7 @@ class HostMcpClient:
         raw_session = await self._session_context.__aenter__()
         self._session = PytestClientSession(raw_session)
         initialized = await self._session.initialize()
+        require_host_protocol_version(initialized.capabilities)
         server_name = initialized.serverInfo.name
         server_version = initialized.serverInfo.version
         if (server_name, server_version) != (

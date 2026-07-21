@@ -40,6 +40,11 @@ class FakeSession:
         return SimpleNamespace(
             protocolVersion="2025-06-18",
             serverInfo=SimpleNamespace(name=self.server_name, version=self.server_version),
+            capabilities=SimpleNamespace(
+                experimental={
+                    "devtools": {"protocol": {"version": "4.0.0"}}
+                }
+            ),
         )
 
     async def initialize(self) -> Any:
